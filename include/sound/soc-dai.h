@@ -2,7 +2,6 @@
  * linux/sound/soc-dai.h -- ALSA SoC Layer
  *
  * Copyright:	2005-2008 Wolfson Microelectronics. PLC.
- * Copyright (c) 2012, Code Aurora Forum. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -122,10 +121,6 @@ int snd_soc_dai_set_channel_map(struct snd_soc_dai *dai,
 	unsigned int tx_num, unsigned int *tx_slot,
 	unsigned int rx_num, unsigned int *rx_slot);
 
-int snd_soc_dai_get_channel_map(struct snd_soc_dai *dai,
-	unsigned int *tx_num, unsigned int *tx_slot,
-	unsigned int *rx_num, unsigned int *rx_slot);
-
 int snd_soc_dai_set_tristate(struct snd_soc_dai *dai, int tristate);
 
 /* Digital Audio Interface mute */
@@ -155,9 +150,6 @@ struct snd_soc_dai_ops {
 		unsigned int rx_num, unsigned int *rx_slot);
 	int (*set_tristate)(struct snd_soc_dai *dai, int tristate);
 
-	int (*get_channel_map)(struct snd_soc_dai *dai,
-		unsigned int *tx_num, unsigned int *tx_slot,
-		unsigned int *rx_num, unsigned int *rx_slot);
 	/*
 	 * DAI digital mute - optional.
 	 * Called by soc-core to minimise any pops.

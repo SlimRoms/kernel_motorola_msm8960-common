@@ -1,4 +1,4 @@
-/* Copyright (c) 2011-2012, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2011, Code Aurora Forum. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -75,8 +75,6 @@
 #define SAT_MSG_VER	0x1
 #define SAT_MSG_PROT	0x1
 #define MSM_SAT_SUCCSS	0x20
-#define MSM_MAX_NSATS	2
-#define MSM_MAX_SATCH	32
 
 #define QC_MFGID_LSB	0x2
 #define QC_MFGID_MSB	0x17
@@ -227,7 +225,7 @@ struct msm_slim_ctrl {
 	int			err;
 	int			ee;
 	struct completion	*wr_comp;
-	struct msm_slim_sat	*satd[MSM_MAX_NSATS];
+	struct msm_slim_sat	*satd;
 	struct msm_slim_endp	pipes[7];
 	struct msm_slim_sps_bam	bam;
 	struct msm_slim_endp	rx_msgq;
@@ -242,14 +240,6 @@ struct msm_slim_ctrl {
 	bool			reconf_busy;
 	bool			chan_active;
 	enum msm_ctrl_state	state;
-	int			nsats;
-};
-
-struct msm_sat_chan {
-	u8 chan;
-	u16 chanh;
-	int req_rem;
-	int req_def;
 };
 
 struct msm_slim_sat {
@@ -258,7 +248,7 @@ struct msm_slim_sat {
 	struct workqueue_struct *wq;
 	struct work_struct	wd;
 	u8			sat_msgs[SAT_CONCUR_MSG][40];
-	struct msm_sat_chan	*satch;
+	u16			*satch;
 	u8			nsatch;
 	bool			sent_capability;
 	bool			pending_reconf;
@@ -267,8 +257,6 @@ struct msm_slim_sat {
 	int			stail;
 	spinlock_t lock;
 };
-
-static struct msm_slim_sat *msm_slim_alloc_sat(struct msm_slim_ctrl *dev);
 
 static int msm_slim_rx_enqueue(struct msm_slim_ctrl *dev, u32 *buf, u8 len)
 {
@@ -376,18 +364,6 @@ static void msm_slim_put_ctrl(struct msm_slim_ctrl *dev)
 #endif
 }
 
-static struct msm_slim_sat *addr_to_sat(struct msm_slim_ctrl *dev, u8 laddr)
-{
-	struct msm_slim_sat *sat = NULL;
-	int i = 0;
-	while (!sat && i < dev->nsats) {
-		if (laddr == dev->satd[i]->satcl.laddr)
-			sat = dev->satd[i];
-		i++;
-	}
-	return sat;
-}
-
 static irqreturn_t msm_slim_interrupt(int irq, void *d)
 {
 	struct msm_slim_ctrl *dev = d;
@@ -427,13 +403,8 @@ static irqreturn_t msm_slim_interrupt(int irq, void *d)
 		dev_dbg(dev->dev, "MC: %x, MT: %x\n", mc, mt);
 		if (mt == SLIM_MSG_MT_DEST_REFERRED_USER ||
 				mt == SLIM_MSG_MT_SRC_REFERRED_USER) {
-			u8 laddr = (u8)((rx_buf[0] >> 16) & 0xFF);
-			struct msm_slim_sat *sat = addr_to_sat(dev, laddr);
-			if (sat)
-				msm_sat_enqueue(sat, rx_buf, len);
-			else
-				dev_err(dev->dev, "unknown sat:%d message",
-						laddr);
+			struct msm_slim_sat *sat = dev->satd;
+			msm_sat_enqueue(sat, rx_buf, len);
 			writel_relaxed(MGR_INT_RX_MSG_RCVD,
 					dev->base + MGR_INT_CLR);
 			/*
@@ -441,21 +412,37 @@ static irqreturn_t msm_slim_interrupt(int irq, void *d)
 			 * queuing work
 			 */
 			mb();
-			if (sat)
-				queue_work(sat->wq, &sat->wd);
+			queue_work(sat->wq, &sat->wd);
 		} else if (mt == SLIM_MSG_MT_CORE &&
 			mc == SLIM_MSG_MC_REPORT_PRESENT) {
 			u8 e_addr[6];
 			msm_get_eaddr(e_addr, rx_buf);
-			msm_slim_rx_enqueue(dev, rx_buf, len);
-			writel_relaxed(MGR_INT_RX_MSG_RCVD, dev->base +
-						MGR_INT_CLR);
-			/*
-			 * Guarantee that CLR bit write goes through
-			 * before signalling completion
-			 */
-			mb();
-			complete(&dev->rx_msgq_notify);
+			if (msm_is_sat_dev(e_addr)) {
+				/*
+				 * Consider possibility that this device may
+				 * be reporting more than once?
+				 */
+				struct msm_slim_sat *sat = dev->satd;
+				msm_sat_enqueue(sat, rx_buf, len);
+				writel_relaxed(MGR_INT_RX_MSG_RCVD, dev->base +
+							MGR_INT_CLR);
+				/*
+				 * Guarantee that CLR bit write goes through
+				 * before queuing work
+				 */
+				mb();
+				queue_work(sat->wq, &sat->wd);
+			} else {
+				msm_slim_rx_enqueue(dev, rx_buf, len);
+				writel_relaxed(MGR_INT_RX_MSG_RCVD, dev->base +
+							MGR_INT_CLR);
+				/*
+				 * Guarantee that CLR bit write goes through
+				 * before signalling completion
+				 */
+				mb();
+				complete(&dev->rx_msgq_notify);
+			}
 		} else if (mc == SLIM_MSG_MC_REPLY_INFORMATION ||
 				mc == SLIM_MSG_MC_REPLY_VALUE) {
 			msm_slim_rx_enqueue(dev, rx_buf, len);
@@ -975,67 +962,18 @@ static int msm_sat_define_ch(struct msm_slim_sat *sat, u8 *buf, u8 len, u8 mc)
 	int i;
 	int ret = 0;
 	if (mc == SLIM_USR_MC_CHAN_CTRL) {
-		for (i = 0; i < sat->nsatch; i++) {
-			if (buf[5] == sat->satch[i].chan)
-				break;
-		}
-		if (i >= sat->nsatch)
-			return -ENOTCONN;
+		u16 chanh = sat->satch[buf[5]];
 		oper = ((buf[3] & 0xC0) >> 6);
 		/* part of grp. activating/removing 1 will take care of rest */
-		ret = slim_control_ch(&sat->satcl, sat->satch[i].chanh, oper,
-					false);
-		if (!ret) {
-			for (i = 5; i < len; i++) {
-				int j;
-				for (j = 0; j < sat->nsatch; j++) {
-					if (buf[i] == sat->satch[j].chan) {
-						if (oper == SLIM_CH_REMOVE)
-							sat->satch[j].req_rem++;
-						else
-							sat->satch[j].req_def++;
-						break;
-					}
-				}
-			}
-		}
+		ret = slim_control_ch(&sat->satcl, chanh, oper, false);
 	} else {
 		u16 chh[40];
 		struct slim_ch prop;
 		u32 exp;
 		u8 coeff, cc;
 		u8 prrate = buf[6];
-		if (len <= 8)
-			return -EINVAL;
-		for (i = 8; i < len; i++) {
-			int j = 0;
-			for (j = 0; j < sat->nsatch; j++) {
-				if (sat->satch[j].chan == buf[i]) {
-					chh[i - 8] = sat->satch[j].chanh;
-					break;
-				}
-			}
-			if (j < sat->nsatch) {
-				u16 dummy;
-				ret = slim_query_ch(&sat->satcl, buf[i],
-							&dummy);
-				if (ret)
-					return ret;
-				if (mc == SLIM_USR_MC_DEF_ACT_CHAN)
-					sat->satch[j].req_def++;
-				continue;
-			}
-			if (sat->nsatch >= MSM_MAX_SATCH)
-				return -EXFULL;
-			ret = slim_query_ch(&sat->satcl, buf[i], &chh[i - 8]);
-			if (ret)
-				return ret;
-			sat->satch[j].chan = buf[i];
-			sat->satch[j].chanh = chh[i - 8];
-			if (mc == SLIM_USR_MC_DEF_ACT_CHAN)
-				sat->satch[j].req_def++;
-			sat->nsatch++;
-		}
+		for (i = 8; i < len; i++)
+			chh[i-8] = sat->satch[buf[i]];
 		prop.dataf = (enum slim_ch_dataf)((buf[3] & 0xE0) >> 5);
 		prop.auxf = (enum slim_ch_auxf)((buf[4] & 0xC0) >> 5);
 		prop.baser = SLIM_RATE_4000HZ;
@@ -1051,18 +989,17 @@ static int msm_sat_define_ch(struct msm_slim_sat *sat, u8 *buf, u8 len, u8 mc)
 		prop.ratem = cc * (1 << exp);
 		if (i > 9)
 			ret = slim_define_ch(&sat->satcl, &prop, chh, len - 8,
-					true, &chh[0]);
+						true, &sat->satch[buf[8]]);
 		else
 			ret = slim_define_ch(&sat->satcl, &prop,
-					&chh[0], 1, false, NULL);
+						&sat->satch[buf[8]], 1, false,
+						NULL);
 		dev_dbg(dev->dev, "define sat grp returned:%d", ret);
-		if (ret)
-			return ret;
 
 		/* part of group so activating 1 will take care of rest */
 		if (mc == SLIM_USR_MC_DEF_ACT_CHAN)
 			ret = slim_control_ch(&sat->satcl,
-					chh[0],
+					sat->satch[buf[8]],
 					SLIM_CH_ACTIVATE, false);
 	}
 	return ret;
@@ -1095,18 +1032,6 @@ static void msm_slim_rxwq(struct msm_slim_ctrl *dev)
 				laddr == (QC_MSM_DEVS - 1))
 				pm_runtime_enable(dev->dev);
 
-			if (!ret && msm_is_sat_dev(e_addr)) {
-				struct msm_slim_sat *sat = addr_to_sat(dev,
-								laddr);
-				if (!sat)
-					sat = msm_slim_alloc_sat(dev);
-				if (!sat)
-					return;
-
-				sat->satcl.laddr = laddr;
-				msm_sat_enqueue(sat, (u32 *)buf, len);
-				queue_work(sat->wq, &sat->wd);
-			}
 		} else if (mc == SLIM_MSG_MC_REPLY_INFORMATION ||
 				mc == SLIM_MSG_MC_REPLY_VALUE) {
 			u8 tid = buf[3];
@@ -1142,6 +1067,7 @@ static void slim_sat_rxprocess(struct work_struct *work)
 
 	while ((msm_sat_dequeue(sat, buf)) != -ENODATA) {
 		struct slim_msg_txn txn;
+		int i;
 		u8 len, mc, mt;
 		u32 bw_sl;
 		int ret = 0;
@@ -1149,7 +1075,6 @@ static void slim_sat_rxprocess(struct work_struct *work)
 		bool gen_ack = false;
 		u8 tid;
 		u8 wbuf[8];
-		int i;
 		txn.mt = SLIM_MSG_MT_SRC_REFERRED_USER;
 		txn.dt = SLIM_MSG_DEST_LOGICALADDR;
 		txn.ec = 0;
@@ -1190,23 +1115,20 @@ static void slim_sat_rxprocess(struct work_struct *work)
 				continue;
 			}
 			/* send a Manager capability msg */
-			if (sat->sent_capability) {
-				if (mt == SLIM_MSG_MT_CORE)
-					goto send_capability;
-				else
-					continue;
-			}
+			if (sat->sent_capability)
+				continue;
 			ret = slim_add_device(&dev->ctrl, &sat->satcl);
 			if (ret) {
 				dev_err(dev->dev,
 					"Satellite-init failed");
 				continue;
 			}
-			/* Satellite-channels */
-			sat->satch = kzalloc(MSM_MAX_SATCH *
-					sizeof(struct msm_sat_chan),
-					GFP_KERNEL);
-send_capability:
+			/* Satellite owns first 21 channels */
+			sat->satch = kzalloc(21 * sizeof(u16), GFP_KERNEL);
+			sat->nsatch = 20;
+			/* alloc all sat chans */
+			for (i = 0; i < 21; i++)
+				slim_alloc_ch(&sat->satcl, &sat->satch[i]);
 			txn.mc = SLIM_USR_MC_MASTER_CAPABILITY;
 			txn.mt = SLIM_MSG_MT_SRC_REFERRED_USER;
 			txn.la = sat->satcl.laddr;
@@ -1257,20 +1179,6 @@ send_capability:
 			tid = buf[3];
 			gen_ack = true;
 			ret = slim_reconfigure_now(&sat->satcl);
-			for (i = 0; i < sat->nsatch; i++) {
-				struct msm_sat_chan *sch = &sat->satch[i];
-				if (sch->req_rem) {
-					if (!ret)
-						slim_dealloc_ch(&sat->satcl,
-								sch->chanh);
-					sch->req_rem--;
-				} else if (sch->req_def) {
-					if (ret)
-						slim_dealloc_ch(&sat->satcl,
-								sch->chanh);
-					sch->req_def--;
-				}
-			}
 			if (sat->pending_reconf) {
 				msm_slim_put_ctrl(dev);
 				sat->pending_reconf = false;
@@ -1336,44 +1244,6 @@ send_capability:
 		if (satv >= 0)
 			msm_slim_put_ctrl(dev);
 	}
-}
-
-static struct msm_slim_sat *msm_slim_alloc_sat(struct msm_slim_ctrl *dev)
-{
-	struct msm_slim_sat *sat;
-	char *name;
-	if (dev->nsats >= MSM_MAX_NSATS)
-		return NULL;
-
-	sat = kzalloc(sizeof(struct msm_slim_sat), GFP_KERNEL);
-	if (!sat) {
-		dev_err(dev->dev, "no memory for satellite");
-		return NULL;
-	}
-	name = kzalloc(SLIMBUS_NAME_SIZE, GFP_KERNEL);
-	if (!name) {
-		dev_err(dev->dev, "no memory for satellite name");
-		kfree(sat);
-		return NULL;
-	}
-	dev->satd[dev->nsats] = sat;
-	sat->dev = dev;
-	snprintf(name, SLIMBUS_NAME_SIZE, "msm_sat%d", dev->nsats);
-	sat->satcl.name = name;
-	spin_lock_init(&sat->lock);
-	INIT_WORK(&sat->wd, slim_sat_rxprocess);
-	sat->wq = create_singlethread_workqueue(sat->satcl.name);
-	if (!sat->wq) {
-		kfree(name);
-		kfree(sat);
-		return NULL;
-	}
-	/*
-	 * Both sats will be allocated from RX thread and RX thread will
-	 * process messages sequentially. No synchronization necessary
-	 */
-	dev->nsats++;
-	return sat;
 }
 
 static void
@@ -1508,13 +1378,18 @@ static int msm_slim_rx_msgq_thread(void *data)
 			mc = (buffer[0] >> 8) & 0xff;
 			dev_dbg(dev->dev, "MC: %x, MT: %x\n", mc, mt);
 			if (mt == SLIM_MSG_MT_DEST_REFERRED_USER ||
-				mt == SLIM_MSG_MT_SRC_REFERRED_USER) {
-				u8 laddr;
-				laddr = (u8)((buffer[0] >> 16) & 0xff);
-				sat = addr_to_sat(dev, laddr);
-			}
+				mt == SLIM_MSG_MT_SRC_REFERRED_USER)
+				sat = dev->satd;
+
 		} else if ((index * 4) >= msg_len) {
 			index = 0;
+			if (mt == SLIM_MSG_MT_CORE &&
+				mc == SLIM_MSG_MC_REPORT_PRESENT) {
+				u8 e_addr[6];
+				msm_get_eaddr(e_addr, buffer);
+				if (msm_is_sat_dev(e_addr))
+					sat = dev->satd;
+			}
 			if (sat) {
 				msm_sat_enqueue(sat, buffer, msg_len);
 				queue_work(sat->wq, &sat->wd);
@@ -1865,6 +1740,11 @@ static int __devinit msm_slim_probe(struct platform_device *pdev)
 	}
 
 
+	dev->rclk = clk_get(dev->dev, "audio_slimbus_clk");
+	if (!dev->rclk) {
+		dev_err(dev->dev, "slimbus clock not found");
+		goto err_clk_get_failed;
+	}
 	dev->framer.rootfreq = SLIM_ROOT_FREQ >> 3;
 	dev->framer.superfreq =
 		dev->framer.rootfreq / SLIM_CL_PER_SUPERFRAME_DIV8;
@@ -1879,24 +1759,21 @@ static int __devinit msm_slim_probe(struct platform_device *pdev)
 		goto err_request_irq_failed;
 	}
 
+	dev->satd = kzalloc(sizeof(struct msm_slim_sat), GFP_KERNEL);
+	if (!dev->satd) {
+		ret = -ENOMEM;
+		goto err_sat_failed;
+	}
+
 	msm_slim_prg_slew(pdev, dev);
-
-	/* Register with framework before enabling frame, clock */
-	ret = slim_add_numbered_controller(&dev->ctrl);
-	if (ret) {
-		dev_err(dev->dev, "error adding controller\n");
-		goto err_ctrl_failed;
-	}
-
-
-	dev->rclk = clk_get(dev->dev, "audio_slimbus_clk");
-	if (!dev->rclk) {
-		dev_err(dev->dev, "slimbus clock not found");
-		goto err_clk_get_failed;
-	}
 	clk_set_rate(dev->rclk, SLIM_ROOT_FREQ);
 	clk_enable(dev->rclk);
 
+	dev->satd->dev = dev;
+	dev->satd->satcl.name  = "msm_sat_dev";
+	spin_lock_init(&dev->satd->lock);
+	INIT_WORK(&dev->satd->wd, slim_sat_rxprocess);
+	dev->satd->wq = create_singlethread_workqueue("msm_slim_sat");
 	/* Component register initialization */
 	writel_relaxed(1, dev->base + COMP_CFG);
 	writel_relaxed((EE_MGR_RSC_GRP | EE_NGD_2 | EE_NGD_1),
@@ -1921,6 +1798,13 @@ static int __devinit msm_slim_probe(struct platform_device *pdev)
 	 * before framer register writes
 	 */
 	wmb();
+
+	/* Register with framework before enabling frame, clock */
+	ret = slim_add_numbered_controller(&dev->ctrl);
+	if (ret) {
+		dev_err(dev->dev, "error adding controller\n");
+		goto err_ctrl_failed;
+	}
 
 	/* Framer register initialization */
 	writel_relaxed((0xA << REF_CLK_GEAR) | (0xA << CLK_GEAR) |
@@ -1974,9 +1858,13 @@ static int __devinit msm_slim_probe(struct platform_device *pdev)
 
 err_ctrl_failed:
 	writel_relaxed(0, dev->base + COMP_CFG);
-err_clk_get_failed:
 	kfree(dev->satd);
+err_sat_failed:
+	free_irq(dev->irq, dev);
 err_request_irq_failed:
+	clk_disable(dev->rclk);
+	clk_put(dev->rclk);
+err_clk_get_failed:
 	msm_slim_sps_exit(dev);
 err_sps_init_failed:
 	iounmap(dev->bam.base);
@@ -1997,20 +1885,13 @@ static int __devexit msm_slim_remove(struct platform_device *pdev)
 	struct resource *bam_mem;
 	struct resource *slim_mem;
 	struct resource *slew_mem = dev->slew_mem;
-	int i;
-	for (i = 0; i < dev->nsats; i++) {
-		struct msm_slim_sat *sat = dev->satd[i];
-		int j;
-		for (j = 0; j < sat->nsatch; j++)
-			slim_dealloc_ch(&sat->satcl, sat->satch[j].chanh);
-		slim_remove_device(&sat->satcl);
-		kfree(sat->satch);
-		destroy_workqueue(sat->wq);
-		kfree(sat->satcl.name);
-		kfree(sat);
-	}
+	struct msm_slim_sat *sat = dev->satd;
+	slim_remove_device(&sat->satcl);
 	pm_runtime_disable(&pdev->dev);
 	pm_runtime_set_suspended(&pdev->dev);
+	kfree(sat->satch);
+	destroy_workqueue(sat->wq);
+	kfree(sat);
 	free_irq(dev->irq, dev);
 	slim_del_controller(&dev->ctrl);
 	clk_put(dev->rclk);

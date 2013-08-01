@@ -254,9 +254,9 @@ struct apr_svc *apr_register(char *dest, char *svc_name, apr_fn svc_fn,
 	if (!dest || !svc_name || !svc_fn)
 		return NULL;
 
-	if (!strncmp(dest, "ADSP", 4))
+	if (!strcmp(dest, "ADSP"))
 		dest_id = APR_DEST_QDSP6;
-	else if (!strncmp(dest, "MODEM", 5)) {
+	else if (!strcmp(dest, "MODEM")) {
 		dest_id = APR_DEST_MODEM;
 	} else {
 		pr_err("APR: wrong destination\n");
@@ -285,23 +285,23 @@ struct apr_svc *apr_register(char *dest, char *svc_name, apr_fn svc_fn,
 		pr_info("%s: modem Up\n", __func__);
 	}
 
-	if (!strncmp(svc_name, "AFE", 3)) {
+	if (!strcmp(svc_name, "AFE")) {
 		client_id = APR_CLIENT_AUDIO;
 		svc_idx = 0;
 		svc_id = APR_SVC_AFE;
-	} else if (!strncmp(svc_name, "ASM", 3)) {
+	} else if (!strcmp(svc_name, "ASM")) {
 		client_id = APR_CLIENT_AUDIO;
 		svc_idx = 1;
 		svc_id = APR_SVC_ASM;
-	} else if (!strncmp(svc_name, "ADM", 3)) {
+	} else if (!strcmp(svc_name, "ADM")) {
 		client_id = APR_CLIENT_AUDIO;
 		svc_idx = 2;
 		svc_id = APR_SVC_ADM;
-	} else if (!strncmp(svc_name, "CORE", 4)) {
+	} else if (!strcmp(svc_name, "CORE")) {
 		client_id = APR_CLIENT_AUDIO;
 		svc_idx = 3;
 		svc_id = APR_SVC_ADSP_CORE;
-	} else if (!strncmp(svc_name, "TEST", 4)) {
+	} else if (!strcmp(svc_name, "TEST")) {
 		if (dest_id == APR_DEST_QDSP6) {
 			client_id = APR_CLIENT_AUDIO;
 			svc_idx = 4;
@@ -310,19 +310,19 @@ struct apr_svc *apr_register(char *dest, char *svc_name, apr_fn svc_fn,
 			svc_idx = 7;
 		}
 		svc_id = APR_SVC_TEST_CLIENT;
-	} else if (!strncmp(svc_name, "VSM", 3)) {
+	} else if (!strcmp(svc_name, "VSM")) {
 		client_id = APR_CLIENT_VOICE;
 		svc_idx = 0;
 		svc_id = APR_SVC_VSM;
-	} else if (!strncmp(svc_name, "VPM", 3)) {
+	} else if (!strcmp(svc_name, "VPM")) {
 		client_id = APR_CLIENT_VOICE;
 		svc_idx = 1;
 		svc_id = APR_SVC_VPM;
-	} else if (!strncmp(svc_name, "MVS", 3)) {
+	} else if (!strcmp(svc_name, "MVS")) {
 		client_id = APR_CLIENT_VOICE;
 		svc_idx = 2;
 		svc_id = APR_SVC_MVS;
-	} else if (!strncmp(svc_name, "MVM", 3)) {
+	} else if (!strcmp(svc_name, "MVM")) {
 		if (dest_id == APR_DEST_MODEM) {
 			client_id = APR_CLIENT_VOICE;
 			svc_idx = 3;
@@ -332,7 +332,7 @@ struct apr_svc *apr_register(char *dest, char *svc_name, apr_fn svc_fn,
 			svc_idx = 5;
 			svc_id = APR_SVC_ADSP_MVM;
 		}
-	} else if (!strncmp(svc_name, "CVS", 3)) {
+	} else if (!strcmp(svc_name, "CVS")) {
 		if (dest_id == APR_DEST_MODEM) {
 			client_id = APR_CLIENT_VOICE;
 			svc_idx = 4;
@@ -342,7 +342,7 @@ struct apr_svc *apr_register(char *dest, char *svc_name, apr_fn svc_fn,
 			svc_idx = 6;
 			svc_id = APR_SVC_ADSP_CVS;
 		}
-	} else if (!strncmp(svc_name, "CVP", 3)) {
+	} else if (!strcmp(svc_name, "CVP")) {
 		if (dest_id == APR_DEST_MODEM) {
 			client_id = APR_CLIENT_VOICE;
 			svc_idx = 5;
@@ -352,7 +352,7 @@ struct apr_svc *apr_register(char *dest, char *svc_name, apr_fn svc_fn,
 			svc_idx = 7;
 			svc_id = APR_SVC_ADSP_CVP;
 		}
-	} else if (!strncmp(svc_name, "SRD", 3)) {
+	} else if (!strcmp(svc_name, "SRD")) {
 		client_id = APR_CLIENT_VOICE;
 		svc_idx = 6;
 		svc_id = APR_SVC_SRD;
@@ -674,13 +674,16 @@ device_initcall(apr_init);
 
 static int __init apr_late_init(void)
 {
-	int ret = 0;
+	void *ret;
 	init_waitqueue_head(&dsp_wait);
 	init_waitqueue_head(&modem_wait);
 	atomic_set(&dsp_state, 1);
 	atomic_set(&modem_state, 1);
-	subsys_notif_register_notifier("modem", &mnb);
-	subsys_notif_register_notifier("lpass", &lnb);
-	return ret;
+	ret = subsys_notif_register_notifier("modem", &mnb);
+	pr_debug("subsys_register_notifier: ret1 = %p\n", ret);
+	ret = subsys_notif_register_notifier("lpass", &lnb);
+	pr_debug("subsys_register_notifier: ret2 = %p\n", ret);
+
+	return 0;
 }
 late_initcall(apr_late_init);
