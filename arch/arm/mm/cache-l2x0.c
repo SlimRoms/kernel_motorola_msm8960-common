@@ -430,7 +430,6 @@ void __init l2x0_init(void __iomem *base, __u32 aux_val, __u32 aux_mask)
 	 * L2 cache Size =  Way size * Number of ways
 	 */
 	way_size = (aux & L2X0_AUX_CTRL_WAY_SIZE_MASK) >> 17;
-<<<<<<< HEAD
 	way_size = SZ_1K << (way_size + 3);
 	l2x0_size = l2x0_ways * way_size;
 	l2x0_sets = way_size / CACHE_LINE_SIZE;
@@ -462,27 +461,6 @@ void __init l2x0_init(void __iomem *base, __u32 aux_val, __u32 aux_mask)
 		outer_cache.flush_range = l2x0_flush_range_atomic;
 		printk(KERN_INFO "L210 cache controller enabled\n");
 		break;
-=======
-	way_size = 1 << (way_size + 3);
-	l2x0_size = ways * way_size * SZ_1K;
-
-	/*
-	 * Check if l2x0 controller is already enabled.
-	 * If you are booting from non-secure mode
-	 * accessing the below registers will fault.
-	 */
-	if (!(readl_relaxed(l2x0_base + L2X0_CTRL) & 1)) {
-		/* Make sure that I&D is not locked down when starting */
-		l2x0_unlock(cache_id);
-
-		/* l2x0 controller is disabled */
-		writel_relaxed(aux, l2x0_base + L2X0_AUX_CTRL);
-
-		l2x0_inv_all();
-
-		/* enable L2X0 */
-		writel_relaxed(1, l2x0_base + L2X0_CTRL);
->>>>>>> 0e69b54... ARM: 7080/1: l2x0: make sure I&D are not locked down on init
 	}
 
 	outer_cache.sync = l2x0_cache_sync;
