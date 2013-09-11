@@ -113,7 +113,7 @@ struct kgsl_functable {
 	int (*setproperty) (struct kgsl_device *device,
 		enum kgsl_property_type type, void *value,
 		unsigned int sizebytes);
-	void (*next_event)(struct kgsl_device *device,
+	int (*next_event)(struct kgsl_device *device,
 		struct kgsl_event *event);
 };
 
@@ -259,6 +259,12 @@ struct kgsl_process_private {
 	unsigned int refcnt;
 	pid_t pid;
 	spinlock_t mem_lock;
+
+	/* General refcount for process private struct obj */
+	struct kref refcount;
+	/* Mutex to synchronize access to each process_private struct obj */
+	struct mutex process_private_mutex;
+
 	struct rb_root mem_rb;
 	struct idr mem_idr;
 	struct kgsl_pagetable *pagetable;
